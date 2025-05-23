@@ -1,0 +1,74 @@
+📄 Postmortem — Problemas na Aplicação Nginx em Cluster Kind
+
+⚠️ Este postmortem refere-se a um ambiente de laboratório usando Kind. O objetivo foi exercitar troubleshooting, deploys com kubectl, exposição de serviços e práticas de documentação técnica.
+
+📍 Local: Cluster Kubernetes local (teste-local)
+
+⚠️ Impacto Instabilidade nos componentes críticos do Control Plane, afetando a operação do cluster.
+
+
+📌 Resumo
+
+Durante testes em um cluster Kubernetes local utilizando o Kind, ocorreram falhas relacionadas à estabilidade dos componentes do cluster (como o `kube-controller-manager`kube-scheduler
+), problemas de conectividade e TLS entre componentes internos, reinicializações em loop (`CrashLoopBackOff`) e dificuldade em acessar a aplicação NGINX via NodePort. O incidente impactou a disponibilidade do ambiente de testes por aproximadamente 40 minutos.
+
+
+
+🕒 Linha do Tempo dos Eventos
+
+| Horário (UTC) | Evento |
+|---------------|--------|
+| 02:20         | Vários componentes do cluster indicam sucesso no cache sync (`Caches are synced`). |
+| 02:23         | CrashLoopBackOff` detectado em componentes como `controller-manager` e `scheduler`. |
+| 02:29         | kube-controller-manager` falha com erro de TLS: `context deadline exceeded` ao tentar recuperar o lease via HTTPS (porta 6443). |
+| 02:30         | Perda de eleição de líder (`leaderelection lost`) → controlador entra em estado instável. |
+| 02:50         | Cluster Kind deletado e recriado. |
+| 02:45         | Recriação do deployment NGINX → Sucesso. |
+| 02:54         | Serviço exposto via NodePort (porta 30440). |
+| 02:55         | Aplicação NGINX acessível via IP Docker (`{{KIND_CONTROL_PLANE_IP}}:30440`). |
+| 02:56         | Serviço exposto com sucesso usando kubectl expose deployment 
+| 03:00         | Confirmado: serviço do NGINX disponível em (`{{KIND_CONTROL_PLANE_IP}}:30440`). |
+
+
+
+🔍 Causa Raiz
+
+- `kube-controller-manager` falhou ao renovar o lease de liderança por timeout/TLS.
+- Comunicação interna instável com a API do Kubernetes (`https://{{KIND_CONTROL_PLANE_IP}}:6443`).
+- CrashLoopBackOff ocorreu devido à perda de liderança e falha na reconexão automática de componentes. 
+- O serviço do kube-apiserver estava acessível, mas houve problema de comunicação interna entre os controladores e a API. 
+
+
+ 🛠️ Soluções Implementadas
+
+-  Investigação inicial, Verificação dos pods (kubectl get pods -n kube-system).Análise dos logs do kube-scheduler e kube-controller-manager.
+- Recriação do cluster Kind (`kind delete cluster` + `kind create cluster`).
+- Novo deployment NGINX com `kubectl create deployment nginx --image=nginx`.
+- Confirmação do acesso à aplicação via `curl` e navegador.
+
+
+✅ Lições Aprendidas
+
+1. TLS/lease failures são comuns após falhas ou reinícios parciais instabilidades no Kind.
+2. A comunicação entre kube-scheduler e etcd deve ser monitorada para evitar problemas de Leader Election.
+3. A sobrecarga de recursos pode impactar a performance do Control Plane, exigindo ajustes de configuração
+4. O monitoramento do etcd é essencial para prevenir falhas no cluster
+5. CrashLoopBackOff de componentes críticos indica que o cluster está corrompido ou parcialmente disponível, o que justifica um reset completo. 
+
+
+🛡️ Ações Corretivas e Preventivas
+
+- [ ] Automatizar verificação da saúde dos componentes com `kubectl get pods -A`.
+- [ ] Criar script de bootstrap para deploy e expose de aplicações de teste.
+- [ ] Adicionar alias: `alias kind-ip="docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' kind-control-plane"`.
+- [ ] Criar script de sanity check para saúde do cluster.
+- [ ] Incluir testes de TLS entre componentes com kubectl logs e curl --cacert para troubleshooting detalhado. 
+
+
+💡 Como transformá-lo em algo altamente positivo:
+- Aprendi a identificar falhas no ciclo de vida de pods com `CrashLoopBackOff` e entender as causas mais comuns.
+- Compreendi como o líder de controle (controller manager) depende de recursos TLS válidos e sincronização com o etcd.
+- Melhorei minhas habilidades em troubleshooting de clusters locais, especialmente com `kind`, `kubectl logs` e `describe`.
+
+
+
